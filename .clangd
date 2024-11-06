@@ -1,0 +1,2 @@
+CompileFlags:
+    Add: [-IC:\Dev\cpp\vm\q, -std=c++20]
