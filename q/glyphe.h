@@ -14,6 +14,8 @@
 #define GLYPHE_FRG free
 #endif
 
+FILE *dbg_ausgabe = 0;
+
 // OpenType Tabellenverzeichnis Eintrag
 typedef struct {
     char kennung[4];
@@ -54,6 +56,24 @@ typedef struct {
     otf_kontur_t* konturen;
 } otf_glyphe_t;
 
+// Neue Strukturen für die Name-Tabelle
+typedef struct {
+    uint16_t platform_id;
+    uint16_t encoding_id;
+    uint16_t language_id;
+    uint16_t name_id;
+    uint16_t länge;
+    uint16_t versatz;
+    char* text;  // UTF-16BE kodierter String
+} otf_name_eintrag_t;
+
+typedef struct {
+    uint16_t format;
+    uint16_t anzahl;
+    uint16_t text_versatz;
+    otf_name_eintrag_t* einträge;
+} otf_name_tabelle_t;
+
 // Font Datenstruktur
 typedef struct {
     otf_kopf_t kopf;
@@ -68,24 +88,6 @@ typedef struct {
     int16_t unterlänge;
     int16_t zeilenabstand;
 } otf_schrift_t;
-
-// Neue Strukturen für die Name-Tabelle
-typedef struct {
-    uint16_t platform_id;
-    uint16_t encoding_id;
-    uint16_t language_id;
-    uint16_t name_id;
-    uint16_t länge;
-    uint16_t versatz;
-    char* string;  // UTF-16BE kodierter String
-} otf_name_eintrag_t;
-
-typedef struct {
-    uint16_t format;
-    uint16_t anzahl;
-    uint16_t string_versatz;
-    otf_name_eintrag_t* einträge;
-} otf_name_tabelle_t;
 
 // Hilfsfunktion zum Lesen von Big-Endian Werten
 uint32_t
@@ -105,6 +107,7 @@ otf_u16_lesen(FILE* datei)
 {
     uint16_t wert;
     fread(&wert, sizeof(uint16_t), 1, datei);
+
     // Konvertierung von Big-Endian nach Host-Endian
     return ((wert & 0xFF00) >> 8) |
            ((wert & 0x00FF) << 8);
@@ -134,19 +137,24 @@ utf16be_zu_utf8(const uint8_t* utf16be, size_t länge)
     {
         uint16_t codepoint = (utf16be[i] << 8) | utf16be[i + 1];
 
-        if (codepoint < 0x80) {
+        if (codepoint < 0x80)
+        {
             utf8[utf8_pos++] = codepoint;
-        } else if (codepoint < 0x800) {
+        }
+        else if (codepoint < 0x800)
+        {
             utf8[utf8_pos++] = 0xC0 | (codepoint >> 6);
             utf8[utf8_pos++] = 0x80 | (codepoint & 0x3F);
-        } else {
+        }
+        else
+        {
             utf8[utf8_pos++] = 0xE0 | (codepoint >> 12);
             utf8[utf8_pos++] = 0x80 | ((codepoint >> 6) & 0x3F);
             utf8[utf8_pos++] = 0x80 | (codepoint & 0x3F);
         }
     }
     utf8[utf8_pos] = '\0';
-    
+
     return utf8;
 }
 
@@ -161,16 +169,16 @@ otf_name_tabelle_lesen(FILE* datei, otf_schrift_t* schrift, otf_tabelle_t* name_
     // Format und Anzahl der Name Records
     uint16_t format = otf_u16_lesen(datei);
     uint16_t anzahl = otf_u16_lesen(datei);
-    uint16_t string_versatz = otf_u16_lesen(datei);
+    uint16_t text_versatz = otf_u16_lesen(datei);
 
-    // Position des String-Storage (relativ zum Tabellenanfang)
-    long string_basis = name_tabelle->versatz + string_versatz;
+    // Position des Textspeichers (relativ zum Tabellenanfang)
+    long text_basis = name_tabelle->versatz + text_versatz;
 
-    // Temporäres Array für Name Records
+    // Temporäres Array für Nameeinträge
     otf_name_eintrag_t* einträge = (otf_name_eintrag_t*)
         GLYPHE_RES(sizeof(otf_name_eintrag_t) * anzahl);
 
-    // Name Records einlesen
+    // Nameeinträge einlesen
     for (int i = 0; i < anzahl; i++)
     {
         einträge[i].platform_id = otf_u16_lesen(datei);
@@ -181,61 +189,63 @@ otf_name_tabelle_lesen(FILE* datei, otf_schrift_t* schrift, otf_tabelle_t* name_
         einträge[i].versatz = otf_u16_lesen(datei);
 
         // Aktuelle Position merken
-        long current_pos = ftell(datei);
+        long aktuelle_position = ftell(datei);
 
-        // Zum String springen
-        fseek(datei, string_basis + einträge[i].versatz, SEEK_SET);
+        // Zum Text springen
+        fseek(datei, text_basis + einträge[i].versatz, SEEK_SET);
 
-        // String einlesen
-        uint8_t* raw_string = (uint8_t*)GLYPHE_RES(einträge[i].länge);
-        fread(raw_string, 1, einträge[i].länge, datei);
+        // Text einlesen
+        uint8_t* text = (uint8_t*)GLYPHE_RES(einträge[i].länge);
+        fread(text, 1, einträge[i].länge, datei);
 
         // Konvertierung zu UTF-8 wenn nötig
         if (einträge[i].platform_id == 0 || // Unicode
             (einträge[i].platform_id == 3 && einträge[i].encoding_id == 1))
         {
             // Windows Unicode
-            einträge[i].string = utf16be_zu_utf8(raw_string, einträge[i].länge);
+            einträge[i].text = utf16be_zu_utf8(text, einträge[i].länge);
         }
         else
         {
             // Für andere Encodings einfach als ASCII behandeln
-            einträge[i].string = (char*)GLYPHE_RES(einträge[i].länge + 1);
-            memcpy(einträge[i].string, raw_string, einträge[i].länge);
-            einträge[i].string[einträge[i].länge] = '\0';
+            einträge[i].text = (char*)GLYPHE_RES(einträge[i].länge + 1);
+            memcpy(einträge[i].text, text, einträge[i].länge);
+            einträge[i].text[einträge[i].länge] = '\0';
         }
 
-        GLYPHE_FRG(raw_string);
+        GLYPHE_FRG(text);
 
-        // Relevante Strings in der Schrift-Struktur speichern
+        // Relevanten Text in der Schrift-Struktur speichern
         if ((einträge[i].platform_id == 3 && einträge[i].language_id == 0x0409))
         {
             // English (US)
             switch (einträge[i].name_id)
             {
                 case 1: // Artname (Font Family)
+                {
                     if (!schrift->artname) {
-                        schrift->artname = _strdup(einträge[i].string);
+                        schrift->artname = _strdup(einträge[i].text);
                     }
-                    break;
+                } break;
+
                 case 2: // Stilname (Font Subfamily)
+                {
                     if (!schrift->stilname) {
-                        schrift->stilname = _strdup(einträge[i].string);
+                        schrift->stilname = _strdup(einträge[i].text);
                     }
-                    break;
+                } break;
             }
         }
 
         // Zurück zur ursprünglichen Position
-        fseek(datei, current_pos, SEEK_SET);
+        fseek(datei, aktuelle_position, SEEK_SET);
     }
 
     // Aufräumen
     for (int i = 0; i < anzahl; i++)
     {
-        GLYPHE_FRG(einträge[i].string);
+        GLYPHE_FRG(einträge[i].text);
     }
-    GLYPHE_FRG(einträge);
 }
 
 // Verbesserte Implementierung für die Schalter-Allokation und -Verarbeitung
@@ -322,11 +332,35 @@ otf_tabelle_finden(otf_schrift_t* schrift, const char* kennung)
     return NULL;
 }
 
+void
+otf_schrift_info_ausgeben(otf_schrift_t* schrift)
+{
+    printf("Stilname: %s\n", schrift->stilname);
+    printf("Artname: %s\n", schrift->artname);
+    printf("Anzahl Glyphen: %d\n", schrift->glyphen_anzahl);
+    printf("Version: %08X\n", schrift->kopf.sfnt_version);
+
+    // AUFGABE: Anzahl der unterstützten Sprachen ermitteln
+
+    otf_tabelle_t* feat_tabelle = otf_tabelle_finden(schrift, "feat");
+    if (feat_tabelle)
+    {
+        // AUFGABE: OpenType Merkmale ausgeben
+        printf("OpenType Merkmale:\n");
+    }
+    else
+    {
+        printf("Keine OpenType Merkmale gefunden.\n");
+    }
+}
+
 // Hauptfunktion zum Einlesen der Font-Datei
 otf_schrift_t*
 otf_schrift_lesen(const char* dateiname)
 {
-    FILE* datei = fopen(dateiname, "rb");
+    FILE* datei;
+    fopen_s(&datei, dateiname, "rb");
+
     if (!datei)
     {
         printf("Fehler beim Öffnen der Datei\n");
@@ -341,9 +375,9 @@ otf_schrift_lesen(const char* dateiname)
 
     // Prüfen ob es sich um eine gültige OTF/TTF Datei handelt
     if (schrift->kopf.sfnt_version != 0x4F54544F && // 'OTTO' für OTF
-        schrift->kopf.sfnt_version != 0x00010000)  // Version 1.0 für TTF
+        schrift->kopf.sfnt_version != 0x00010000)   // Version 1.0 für TTF
     {
-        printf("Ungültiges Font-Format\n");
+        fprintf(dbg_ausgabe, "Ungültiges Font-Format\n");
         GLYPHE_FRG(schrift);
         fclose(datei);
         return NULL;
@@ -396,106 +430,103 @@ otf_schrift_lesen(const char* dateiname)
     if (glyf_tabelle)
     {
         fseek(datei, glyf_tabelle->versatz, SEEK_SET);
-        for (uint16_t i = 0; i < schrift->glyphen_anzahl; i++)
+        for (int i = 0; i < schrift->glyphen_anzahl; i++)
         {
-            otf_glyphe_t* glyphe = &schrift->glyphen[i];
+            int16_t glyphen_länge = otf_s16_lesen(datei);
 
-            // Lese Konturanzahl
-            int16_t konturen_anzahl = otf_s16_lesen(datei);
-            glyphe->konturen_anzahl = (konturen_anzahl < 0) ? 0 : konturen_anzahl;
-
-            // Lese Bounding Box
-            glyphe->x_min = otf_s16_lesen(datei);
-            glyphe->y_min = otf_s16_lesen(datei);
-            glyphe->x_max = otf_s16_lesen(datei);
-            glyphe->y_max = otf_s16_lesen(datei);
-
-            // Innerhalb der otf_schrift_lesen Funktion, im glyf_tabelle Block:
-            if (glyphe->konturen_anzahl > 0)
+            if (glyphen_länge > 0)
             {
-                // Speicher für Konturen allozieren
-                glyphe->konturen = (otf_kontur_t *) GLYPHE_RES(sizeof(otf_kontur_t) * glyphe->konturen_anzahl);
+                // Einfacher Glyph
+                otf_glyphe_t* glyph = &schrift->glyphen[i];
 
-                // Endpunkte der Konturen einlesen
-                uint16_t* endpunkte = (uint16_t *) GLYPHE_RES(sizeof(uint16_t) * glyphe->konturen_anzahl);
-                for (int j = 0; j < glyphe->konturen_anzahl; j++)
+                // Rahmen
+                glyph->x_min = otf_s16_lesen(datei);
+                glyph->y_min = otf_s16_lesen(datei);
+                glyph->x_max = otf_s16_lesen(datei);
+                glyph->y_max = otf_s16_lesen(datei);
+
+                // Anzahl der Konturen
+                glyph->konturen_anzahl = otf_s16_lesen(datei);
+                glyph->konturen = (otf_kontur_t*) GLYPHE_RES(sizeof(otf_kontur_t) * glyph->konturen_anzahl);
+
+                // Einlesen der einzelnen Konturen
+                for (int j = 0; j < glyph->konturen_anzahl; j++)
                 {
-                    endpunkte[j] = otf_u16_lesen(datei);
+                    otf_kontur_t* kontur = &glyph->konturen[j];
+                    uint16_t punkte_gesamt = otf_u16_lesen(datei);
+                    size_t schalter_anzahl;
+                    uint8_t* schalter = otf_schalter_einlesen(datei, punkte_gesamt, &schalter_anzahl);
+
+                    kontur->punkte = (otf_punkt_t*) GLYPHE_RES(sizeof(otf_punkt_t) * schalter_anzahl);
+                    kontur->punkte_anzahl = (int) schalter_anzahl;
+
+                    int16_t x = 0, y = 0;
+                    for (size_t k = 0; k < schalter_anzahl; k++)
+                    {
+                        if (schalter[k] & 0x01)
+                        {
+                            // Gerade Linie
+                            x += otf_s16_lesen(datei);
+                            y += otf_s16_lesen(datei);
+                        }
+                        else
+                        {
+                            // Kurve
+                            int16_t dx1 = otf_s16_lesen(datei);
+                            int16_t dy1 = otf_s16_lesen(datei);
+                            int16_t dx2 = otf_s16_lesen(datei);
+                            int16_t dy2 = otf_s16_lesen(datei);
+                            x += dx1;
+                            y += dy1;
+                            kontur->punkte[k].x = x;
+                            kontur->punkte[k].y = y;
+                            k++;
+                            x += dx2;
+                            y += dy2;
+                        }
+                        kontur->punkte[k].x = x;
+                        kontur->punkte[k].y = y;
+                        kontur->punkte[k].in_kontur = 1;
+                    }
+
+                    GLYPHE_FRG(schalter);
                 }
+            }
+            else if (glyphen_länge < 0)
+            {
+                // Zusammengesetzter Glyph
+                otf_glyphe_t* glyph = &schrift->glyphen[i];
 
-                // Gesamtanzahl der Punkte bestimmen
-                uint16_t punkte_gesamt = endpunkte[glyphe->konturen_anzahl - 1] + 1;
+                // Anzahl der Komponenten
+                uint16_t komponenten_anzahl = (uint16_t)(-glyphen_länge / 2);
+                glyph->konturen_anzahl = komponenten_anzahl;
+                glyph->konturen = (otf_kontur_t*) GLYPHE_RES(sizeof(otf_kontur_t) * komponenten_anzahl);
 
-                // Schalter einlesen
-                size_t schalter_anzahl = 0;
-                uint8_t* schalter = otf_schalter_einlesen(datei, punkte_gesamt, &schalter_anzahl);
-                if (!schalter)
+                // Einlesen der Komponenten
+                for (int j = 0; j < komponenten_anzahl; j++)
                 {
-                    printf("schalter konnten nicht eingelesen werden");
-                    return NULL;
-                }
+                    otf_kontur_t* kontur = &glyph->konturen[j];
+                    uint16_t glyphen_index = otf_u16_lesen(datei);
+                    int16_t x_versatz = otf_s16_lesen(datei);
+                    int16_t y_versatz = otf_s16_lesen(datei);
+                    uint8_t flags = fgetc(datei);
 
-                // X-Koordinaten einlesen
-                int16_t* x_koord = (int16_t*) GLYPHE_RES(sizeof(int16_t) * punkte_gesamt);
-                int16_t x = 0;
-                for (uint16_t j = 0; j < punkte_gesamt; j++)
-                {
-                    if (schalter[j] & 0x02) // Kurze Form
+                    // Verweis auf Subglyphe kopieren
+                    kontur->punkte = schrift->glyphen[glyphen_index].konturen[0].punkte;
+                    kontur->punkte_anzahl = schrift->glyphen[glyphen_index].konturen[0].punkte_anzahl;
+
+                    // Transformationen anwenden
+                    for (int k = 0; k < kontur->punkte_anzahl; k++)
                     {
-                        x += (schalter[j] & 0x10) ? fgetc(datei) : -fgetc(datei);
-                    }
-                    else if (!(schalter[j] & 0x10))
-                    {
-                        x += otf_s16_lesen(datei);
-                    }
-                    x_koord[j] = x;
-                }
-
-                // Y-Koordinaten einlesen
-                int16_t* y_koord = (int16_t *) GLYPHE_RES(sizeof(int16_t) * punkte_gesamt);
-                int16_t y = 0;
-                for (uint16_t j = 0; j < punkte_gesamt; j++)
-                {
-                    if (schalter[j] & 0x04) // Kurze Form
-                    {
-                        y += (schalter[j] & 0x20) ? fgetc(datei) : -fgetc(datei);
-                    }
-                    else if (!(schalter[j] & 0x20))
-                    {
-                        y += otf_s16_lesen(datei);
-                    }
-                    y_koord[j] = y;
-                }
-
-                // Punkte den Konturen zuordnen
-                uint16_t punkt_index = 0;
-                for (int j = 0; j < glyphe->konturen_anzahl; j++)
-                {
-                    uint16_t punkte_in_kontur = (j == 0)
-                        ? endpunkte[0] + 1
-                        : endpunkte[j] - endpunkte[j-1];
-
-                    glyphe->konturen[j].punkte_anzahl = punkte_in_kontur;
-                    glyphe->konturen[j].punkte = (otf_punkt_t *) GLYPHE_RES(sizeof(otf_punkt_t) * punkte_in_kontur);
-
-                    // INFO: punkte_in_kontur kann größer als punkte_gesamt sein und der zugriff auf
-                    //       die x- und y-koordinaten in der unteren schleife führt zu speicherzugriffsverletzung.
-                    printf("anzahl punkte: %d, anzahl x_koord: %d\n", punkte_in_kontur, punkte_gesamt);
-
-                    for (uint16_t k = 0; k < punkte_in_kontur; k++)
-                    {
-                        glyphe->konturen[j].punkte[k].x = x_koord[punkt_index];
-                        glyphe->konturen[j].punkte[k].y = y_koord[punkt_index];
-                        glyphe->konturen[j].punkte[k].in_kontur = (schalter[punkt_index] & 0x01);
-                        punkt_index++;
+                        kontur->punkte[k].x += x_versatz;
+                        kontur->punkte[k].y += y_versatz;
                     }
                 }
-
-                // Temporäre Felder erst NACH der vollständigen Verarbeitung freigeben
-                GLYPHE_FRG(endpunkte);
-                GLYPHE_FRG(x_koord);
-                GLYPHE_FRG(y_koord);
-                GLYPHE_FRG(schalter);
+            }
+            else
+            {
+                // Leerer Glyph
+                // Nichts zu tun
             }
         }
     }

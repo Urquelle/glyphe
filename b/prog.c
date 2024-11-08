@@ -2,9 +2,18 @@
 
 int main(int argc, char *argv[])
 {
-    otf_schrift_t *fira_code_schrift = otf_schrift_lesen("FiraCode-Regular.ttf");
+    if (fopen_s(&dbg_ausgabe, "fehler.txt", "w") != 0)
+    {
+        printf("datei konnte nicht geöffnet werden.\n");
 
-    printf("%s: %s\n", fira_code_schrift->artname, fira_code_schrift->stilname);
+        exit(1);
+    }
+
+    otf_schrift_t *fira_code_schrift = otf_schrift_lesen("FiraCode-Regular.ttf");
+    if (fira_code_schrift)
+    {
+        otf_schrift_info_ausgeben(fira_code_schrift);
+    }
 
     return 0;
 }
